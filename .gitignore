@@ -1,0 +1,87 @@
+# Build directories
+build/
+Build/
+BUILD/
+cmake-build-*/
+
+# Compiled object files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+simd-bench
+example_*
+insights_demo
+insights_validator
+full_benchmark
+simd_bench_tests
+timing_benchmarks
+kernel_benchmarks
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.code-workspace
+
+# Generated files
+*.log
+*.json.bak
+*.profdata
+*.profraw
+
+# Test results
+Testing/
+test_results/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Package files
+*.tar.gz
+*.zip
+*.deb
+*.rpm
+
+# Documentation build
+docs/_build/
+docs/.doctrees/
+
+# Python (if any scripts)
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Benchmark results
+results/
+*.perf
+perf.data
+perf.data.old
+
+# Coverage
+*.gcov
+*.gcda
+*.gcno
+coverage/
