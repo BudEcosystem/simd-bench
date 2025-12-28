@@ -92,8 +92,17 @@ struct HardwareInfo {
 
     // Helper methods
     std::string get_simd_string() const;
+
+    // Calculate peak GFLOPS with optional AVX-512 throttling adjustment
     double calculate_peak_gflops(bool double_precision = false) const;
+    double calculate_peak_gflops_throttled(bool double_precision,
+                                            AVX512License license) const;
+
+    // Calculate realistic sustained peak (accounts for thermal throttling)
+    double calculate_sustained_peak_gflops(bool double_precision = false) const;
+
     double calculate_ridge_point() const;  // FLOP/byte where compute-bound
+    double calculate_ridge_point_throttled(AVX512License license) const;
 
     // Validate hardware counters are available
     bool has_hardware_counters() const;
@@ -154,12 +163,22 @@ private:
 // Memory bandwidth measurement
 double measure_memory_bandwidth_gbps(size_t size_mb = 64);
 
+// Streaming bandwidth measurement using non-temporal stores (true peak DRAM bandwidth)
+double measure_streaming_bandwidth_gbps(size_t size_mb = 64);
+
+// Read-only bandwidth measurement
+double measure_read_bandwidth_gbps(size_t size_mb = 64);
+
+// Write-only bandwidth measurement (non-temporal)
+double measure_write_bandwidth_gbps(size_t size_mb = 64);
+
 // L1/L2/L3/DRAM bandwidth measurement
 struct BandwidthMeasurement {
     double l1_bandwidth_gbps = 0.0;
     double l2_bandwidth_gbps = 0.0;
     double l3_bandwidth_gbps = 0.0;
     double dram_bandwidth_gbps = 0.0;
+    double streaming_bandwidth_gbps = 0.0;  // Non-temporal stores
 };
 
 BandwidthMeasurement measure_cache_bandwidths();

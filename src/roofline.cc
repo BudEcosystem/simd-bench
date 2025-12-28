@@ -488,4 +488,200 @@ std::vector<RooflineRecommendation> generate_recommendations(
     return recommendations;
 }
 
+// DynamicAIAnalyzer implementation
+DynamicAIResult DynamicAIAnalyzer::analyze(
+    uint64_t total_flops,
+    uint64_t offcore_demand_data_rd,
+    uint64_t offcore_demand_rfo,
+    size_t bytes_per_cacheline
+) {
+    DynamicAIResult result;
+    result.total_flops = total_flops;
+
+    // Each offcore request fetches a full cache line
+    result.bytes_read = offcore_demand_data_rd * bytes_per_cacheline;
+    result.bytes_written = offcore_demand_rfo * bytes_per_cacheline;
+
+    uint64_t total_bytes = result.bytes_read + result.bytes_written;
+
+    if (total_bytes > 0) {
+        result.measured_ai = static_cast<double>(total_flops) / static_cast<double>(total_bytes);
+    } else {
+        result.measured_ai = 0.0;
+    }
+
+    // Classify AI level
+    result.ai_classification = ArithmeticIntensityCalculator::classify(result.measured_ai);
+
+    result.insights = generate_insights(result);
+
+    return result;
+}
+
+DynamicAIResult DynamicAIAnalyzer::analyze_from_l3_misses(
+    uint64_t total_flops,
+    uint64_t l3_read_misses,
+    uint64_t l3_write_misses,
+    size_t bytes_per_cacheline
+) {
+    DynamicAIResult result;
+    result.total_flops = total_flops;
+
+    // L3 misses go to DRAM
+    result.bytes_read = l3_read_misses * bytes_per_cacheline;
+    result.bytes_written = l3_write_misses * bytes_per_cacheline;
+
+    uint64_t total_bytes = result.bytes_read + result.bytes_written;
+
+    if (total_bytes > 0) {
+        result.measured_ai = static_cast<double>(total_flops) / static_cast<double>(total_bytes);
+    } else {
+        result.measured_ai = 0.0;
+    }
+
+    result.ai_classification = ArithmeticIntensityCalculator::classify(result.measured_ai);
+    result.insights = generate_insights(result);
+
+    return result;
+}
+
+DynamicAIResult DynamicAIAnalyzer::analyze_from_imc(
+    uint64_t total_flops,
+    uint64_t imc_cas_reads,
+    uint64_t imc_cas_writes,
+    size_t bytes_per_transaction
+) {
+    DynamicAIResult result;
+    result.total_flops = total_flops;
+
+    // IMC CAS counts are direct memory controller transactions
+    result.bytes_read = imc_cas_reads * bytes_per_transaction;
+    result.bytes_written = imc_cas_writes * bytes_per_transaction;
+
+    uint64_t total_bytes = result.bytes_read + result.bytes_written;
+
+    if (total_bytes > 0) {
+        result.measured_ai = static_cast<double>(total_flops) / static_cast<double>(total_bytes);
+    } else {
+        result.measured_ai = 0.0;
+    }
+
+    result.ai_classification = ArithmeticIntensityCalculator::classify(result.measured_ai);
+    result.insights = generate_insights(result);
+
+    return result;
+}
+
+void DynamicAIAnalyzer::set_theoretical_ai(DynamicAIResult& result, double theoretical_ai) {
+    result.theoretical_ai = theoretical_ai;
+
+    if (result.measured_ai > 0) {
+        result.cache_amplification = ArithmeticIntensityCalculator::cache_amplification(
+            theoretical_ai, result.measured_ai);
+    } else {
+        result.cache_amplification = 1.0;
+    }
+
+    // Re-generate insights with theoretical AI context
+    result.insights = generate_insights(result);
+}
+
+std::vector<std::string> DynamicAIAnalyzer::generate_insights(const DynamicAIResult& result) {
+    std::vector<std::string> insights;
+
+    // Basic AI classification insight
+    if (result.measured_ai < 0.25) {
+        insights.push_back("Very low AI indicates streaming access pattern (memory-bound)");
+    } else if (result.measured_ai < 1.0) {
+        insights.push_back("Low AI suggests memory bandwidth is the primary bottleneck");
+    } else if (result.measured_ai < 4.0) {
+        insights.push_back("Moderate AI - kernel is in transition zone between memory and compute bound");
+    } else if (result.measured_ai < 16.0) {
+        insights.push_back("High AI indicates kernel is approaching compute-bound regime");
+    } else {
+        insights.push_back("Very high AI - kernel is compute-bound, focus on instruction throughput");
+    }
+
+    // Cache amplification insights
+    if (result.theoretical_ai > 0) {
+        double amplification = result.cache_amplification;
+
+        if (amplification > 2.0) {
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(1);
+            oss << "Cache amplification of " << amplification << "x indicates significant cache thrashing";
+            insights.push_back(oss.str());
+            insights.push_back("Consider loop tiling or blocking to improve cache reuse");
+        } else if (amplification > 1.5) {
+            insights.push_back("Moderate cache amplification - some cache inefficiency detected");
+            insights.push_back("Prefetching or data layout changes may help");
+        } else if (amplification < 0.8) {
+            insights.push_back("Excellent cache reuse - measured AI exceeds theoretical minimum");
+        }
+    }
+
+    // Read/write ratio insights
+    if (result.bytes_read > 0 && result.bytes_written > 0) {
+        double read_ratio = static_cast<double>(result.bytes_read) /
+                            static_cast<double>(result.bytes_read + result.bytes_written);
+
+        if (read_ratio > 0.9) {
+            insights.push_back("Workload is read-dominated - good candidate for read-ahead prefetching");
+        } else if (read_ratio < 0.3) {
+            insights.push_back("Workload is write-dominated - consider non-temporal stores");
+        }
+    }
+
+    return insights;
+}
+
+// Enhanced recommendations with dynamic AI
+std::vector<RooflineRecommendation> generate_enhanced_recommendations(
+    const EnhancedRooflinePoint& point,
+    const RooflineModel& model
+) {
+    // Start with base recommendations
+    std::vector<RooflineRecommendation> recommendations =
+        generate_recommendations(point.base, model);
+
+    const auto& ai = point.dynamic_ai;
+
+    // Add dynamic AI-specific recommendations
+    if (ai.cache_amplification > 2.0) {
+        recommendations.push_back({
+            "cache",
+            "Cache amplification " + std::to_string(static_cast<int>(ai.cache_amplification)) +
+            "x detected - implement loop tiling to improve cache reuse",
+            ai.cache_amplification
+        });
+    }
+
+    if (ai.measured_ai < 0.5 && ai.theoretical_ai > 1.0) {
+        recommendations.push_back({
+            "cache",
+            "Measured AI is much lower than theoretical - data layout may cause cache conflicts",
+            ai.theoretical_ai / ai.measured_ai
+        });
+    }
+
+    if (point.cache_behavior == "thrashing") {
+        recommendations.push_back({
+            "cache",
+            "Cache thrashing detected - consider reducing working set or using cache-oblivious algorithms",
+            2.0
+        });
+    }
+
+    // Add insights as info recommendations
+    for (const auto& insight : ai.insights) {
+        recommendations.push_back({
+            "info",
+            insight,
+            0.0
+        });
+    }
+
+    return recommendations;
+}
+
 }  // namespace simd_bench

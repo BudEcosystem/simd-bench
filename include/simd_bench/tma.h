@@ -69,6 +69,13 @@ struct TMAResult {
     }
 };
 
+// CPU vendor for TMA analysis (different formulas for Intel/AMD)
+enum class TMAVendor {
+    AUTO,    // Auto-detect
+    INTEL,   // Intel Top-Down methodology
+    AMD      // AMD Pipeline Utilization (Zen 4+)
+};
+
 // TMA Analyzer
 class TMAAnalyzer {
 public:
@@ -82,6 +89,10 @@ public:
     void set_level(TMALevel level) { level_ = level; }
     TMALevel get_level() const { return level_; }
 
+    // Set vendor (auto-detect by default)
+    void set_vendor(TMAVendor vendor) { vendor_ = vendor; }
+    TMAVendor get_vendor() const { return vendor_; }
+
     // Run analysis on counter values
     TMAResult analyze(const CounterValues& values) const;
 
@@ -94,15 +105,28 @@ public:
     // Get required events for the current analysis level
     std::vector<CounterEvent> get_required_events() const;
 
+    // Get AMD-specific events for Pipeline Utilization
+    std::vector<CounterEvent> get_amd_required_events() const;
+
     // Check if TMA is supported on current hardware
     static bool is_supported();
+
+    // Check if AMD Pipeline Utilization is supported
+    static bool is_amd_supported();
 
 private:
     IPerformanceCounters* counters_ = nullptr;
     TMALevel level_ = TMALevel::LEVEL1;
+    TMAVendor vendor_ = TMAVendor::AUTO;
 
-    // Calculate TMA metrics from raw counter values
+    // Detect CPU vendor
+    TMAVendor detect_vendor() const;
+
+    // Calculate TMA metrics from raw counter values (Intel)
     TMAMetrics calculate_metrics(const CounterValues& values) const;
+
+    // Calculate AMD Pipeline Utilization metrics (Zen 4+)
+    TMAMetrics calculate_amd_metrics(const CounterValues& values) const;
 
     // Classify bottleneck
     TMACategoryResult classify_category(TMACategory cat, const TMAMetrics& metrics) const;

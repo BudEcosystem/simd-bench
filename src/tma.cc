@@ -2,8 +2,27 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cstring>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <cpuid.h>
+#endif
 
 namespace simd_bench {
+
+// AMD-specific counter events for Pipeline Utilization
+// These are based on AMD Zen 4+ PMU documentation
+enum class AMDEvent {
+    // AMD Pipeline Utilization events (approximate equivalents)
+    EX_RET_INSTR,           // Retired Instructions
+    EX_RET_UOPS,            // Retired micro-ops
+    DE_DIS_UOPS_FROM_DECODER,// uops from decoder
+    DE_NO_DISPATCH_CYCLES,  // Cycles with no dispatch
+    EX_RET_BRN_MISP,        // Mispredicted branches
+    LS_DC_ACCESSES,         // Data cache accesses
+    LS_L2_MISS_DC,          // L2 misses from DC
+    IC_FETCH_STALL,         // Instruction fetch stalls
+};
 
 TMAAnalyzer::TMAAnalyzer() {}
 
@@ -39,7 +58,18 @@ std::vector<CounterEvent> TMAAnalyzer::get_required_events() const {
 
 TMAResult TMAAnalyzer::analyze(const CounterValues& values) const {
     TMAResult result;
-    result.metrics = calculate_metrics(values);
+
+    // Select appropriate metrics calculation based on vendor
+    TMAVendor effective_vendor = vendor_;
+    if (effective_vendor == TMAVendor::AUTO) {
+        effective_vendor = detect_vendor();
+    }
+
+    if (effective_vendor == TMAVendor::AMD) {
+        result.metrics = calculate_amd_metrics(values);
+    } else {
+        result.metrics = calculate_metrics(values);
+    }
 
     // Classify each category
     result.categories.push_back(classify_category(TMACategory::RETIRING, result.metrics));
@@ -260,6 +290,144 @@ bool TMAAnalyzer::is_supported() {
 #else
     return false;
 #endif
+}
+
+bool TMAAnalyzer::is_amd_supported() {
+    // AMD Pipeline Utilization is supported on Zen 4+
+#if defined(__x86_64__) || defined(_M_X64)
+    uint32_t eax, ebx, ecx, edx;
+    __cpuid(0, eax, ebx, ecx, edx);
+
+    char vendor[13];
+    memcpy(vendor, &ebx, 4);
+    memcpy(vendor + 4, &edx, 4);
+    memcpy(vendor + 8, &ecx, 4);
+    vendor[12] = '\0';
+
+    if (strcmp(vendor, "AuthenticAMD") == 0) {
+        // Check for Zen 4+ (family 0x19 or higher)
+        __cpuid(1, eax, ebx, ecx, edx);
+        uint32_t family = ((eax >> 8) & 0xF);
+        if (family == 0xF) {
+            family += ((eax >> 20) & 0xFF);
+        }
+        return family >= 0x19;  // Zen 3+ family, Zen 4 is better supported
+    }
+#endif
+    return false;
+}
+
+TMAVendor TMAAnalyzer::detect_vendor() const {
+#if defined(__x86_64__) || defined(_M_X64)
+    uint32_t eax, ebx, ecx, edx;
+    __cpuid(0, eax, ebx, ecx, edx);
+
+    char vendor[13];
+    memcpy(vendor, &ebx, 4);
+    memcpy(vendor + 4, &edx, 4);
+    memcpy(vendor + 8, &ecx, 4);
+    vendor[12] = '\0';
+
+    if (strcmp(vendor, "GenuineIntel") == 0) return TMAVendor::INTEL;
+    if (strcmp(vendor, "AuthenticAMD") == 0) return TMAVendor::AMD;
+#endif
+    return TMAVendor::INTEL;  // Default to Intel methodology
+}
+
+std::vector<CounterEvent> TMAAnalyzer::get_amd_required_events() const {
+    std::vector<CounterEvent> events;
+
+    // Basic events for AMD Pipeline Utilization
+    events.push_back(CounterEvent::CYCLES);
+    events.push_back(CounterEvent::INSTRUCTIONS);
+    events.push_back(CounterEvent::UOPS_RETIRED_SLOTS);  // Maps to EX_RET_UOPS
+    events.push_back(CounterEvent::BRANCH_MISSES);       // Maps to EX_RET_BRN_MISP
+
+    if (level_ >= TMALevel::LEVEL2) {
+        events.push_back(CounterEvent::L1D_READ_MISS);
+        events.push_back(CounterEvent::L2_READ_MISS);
+    }
+
+    if (level_ >= TMALevel::LEVEL3) {
+        events.push_back(CounterEvent::L3_READ_MISS);
+        events.push_back(CounterEvent::AMD_FP_RET_SSE_AVX_OPS);
+    }
+
+    return events;
+}
+
+TMAMetrics TMAAnalyzer::calculate_amd_metrics(const CounterValues& values) const {
+    TMAMetrics metrics;
+
+    uint64_t cycles = values.get(CounterEvent::CYCLES);
+    uint64_t instructions = values.get(CounterEvent::INSTRUCTIONS);
+    uint64_t uops_retired = values.get(CounterEvent::UOPS_RETIRED_SLOTS);
+    uint64_t branch_misses = values.get(CounterEvent::BRANCH_MISSES);
+
+    if (cycles == 0) {
+        return metrics;
+    }
+
+    // AMD Zen has a 4-wide pipeline (dispatch width)
+    const double pipeline_width = 4.0;
+    double total_slots = cycles * pipeline_width;
+
+    // Retiring: fraction of slots used by retired uops
+    metrics.retiring = static_cast<double>(uops_retired) / total_slots;
+    metrics.retiring = std::clamp(metrics.retiring, 0.0, 1.0);
+
+    // Bad Speculation: estimated from branch mispredictions
+    // Each mispredict causes ~15-20 cycle penalty on Zen
+    const double avg_mispredict_penalty = 18.0;
+    double mispredict_slots = branch_misses * avg_mispredict_penalty * pipeline_width;
+    metrics.bad_speculation = mispredict_slots / total_slots;
+    metrics.bad_speculation = std::clamp(metrics.bad_speculation, 0.0, 0.5);
+
+    // Remaining is split between frontend and backend
+    double remaining = 1.0 - metrics.retiring - metrics.bad_speculation;
+    remaining = std::max(0.0, remaining);
+
+    // AMD doesn't expose exact frontend/backend split like Intel
+    // Estimate based on IPC (low IPC often indicates backend bound)
+    double ipc = static_cast<double>(instructions) / cycles;
+    double backend_factor = ipc < 2.0 ? 0.75 : (ipc < 3.0 ? 0.5 : 0.3);
+
+    metrics.backend_bound = remaining * backend_factor;
+    metrics.frontend_bound = remaining * (1.0 - backend_factor);
+
+    // Level 2 breakdown
+    if (level_ >= TMALevel::LEVEL2) {
+        uint64_t l1_misses = values.get(CounterEvent::L1D_READ_MISS);
+        uint64_t l2_misses = values.get(CounterEvent::L2_READ_MISS);
+
+        // Memory bound estimate from cache misses
+        double miss_penalty_cycles = l1_misses * 4 + l2_misses * 12;  // Approximate
+        double mem_bound_ratio = miss_penalty_cycles / cycles;
+        mem_bound_ratio = std::clamp(mem_bound_ratio, 0.0, metrics.backend_bound);
+
+        metrics.memory_bound = mem_bound_ratio;
+        metrics.core_bound = metrics.backend_bound - metrics.memory_bound;
+        metrics.core_bound = std::max(0.0, metrics.core_bound);
+    }
+
+    // Level 3 breakdown
+    if (level_ >= TMALevel::LEVEL3) {
+        uint64_t l3_misses = values.get(CounterEvent::L3_READ_MISS);
+        uint64_t l1_misses = values.get(CounterEvent::L1D_READ_MISS);
+        uint64_t l2_misses = values.get(CounterEvent::L2_READ_MISS);
+
+        // Estimate cache level contributions
+        double total_weighted_misses = l1_misses * 4.0 + l2_misses * 12.0 + l3_misses * 50.0;
+        if (total_weighted_misses > 0 && metrics.memory_bound > 0) {
+            metrics.l1_bound = metrics.memory_bound * (l1_misses * 4.0) / total_weighted_misses;
+            metrics.l2_bound = metrics.memory_bound * (l2_misses * 12.0) / total_weighted_misses;
+            metrics.l3_bound = metrics.memory_bound * (l3_misses * 50.0) / total_weighted_misses;
+            metrics.dram_bound = metrics.memory_bound - metrics.l1_bound - metrics.l2_bound - metrics.l3_bound;
+            metrics.dram_bound = std::max(0.0, metrics.dram_bound);
+        }
+    }
+
+    return metrics;
 }
 
 // String formatting

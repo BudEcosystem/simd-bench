@@ -13,6 +13,8 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <atomic>
 
 namespace simd_bench {
 
@@ -88,6 +90,24 @@ private:
     std::unique_ptr<TMAAnalyzer> tma_analyzer_;
 
     ProgressCallback progress_callback_;
+    mutable std::mutex callback_mutex_;  // Thread-safe access to progress_callback_
+    std::atomic<bool> benchmark_running_{false};
+
+    // Thread-safe callback invocation
+    void invoke_progress_callback(
+        const std::string& kernel_name,
+        const std::string& variant_name,
+        size_t current_size,
+        size_t total_sizes,
+        size_t current_iteration,
+        size_t total_iterations
+    ) const {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        if (progress_callback_) {
+            progress_callback_(kernel_name, variant_name, current_size,
+                               total_sizes, current_iteration, total_iterations);
+        }
+    }
 
     void initialize();
 

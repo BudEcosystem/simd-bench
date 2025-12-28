@@ -99,6 +99,62 @@ private:
     double measure_peak_compute();
 };
 
+// Dynamic Arithmetic Intensity measurement from hardware counters
+struct DynamicAIResult {
+    double measured_ai = 0.0;           // Actual FLOP/byte from counters
+    double theoretical_ai = 0.0;        // Theoretical minimum AI
+    double cache_amplification = 1.0;   // How much extra memory traffic vs theoretical
+    uint64_t total_flops = 0;
+    uint64_t bytes_read = 0;
+    uint64_t bytes_written = 0;
+    std::string ai_classification;      // "streaming", "memory-bound", "compute-bound"
+    std::vector<std::string> insights;  // Observations about cache behavior
+};
+
+// Counter-based dynamic AI calculator
+class DynamicAIAnalyzer {
+public:
+    // Calculate AI from offcore/IMC counter values
+    // bytes_per_cacheline typically 64
+    static DynamicAIResult analyze(
+        uint64_t total_flops,
+        uint64_t offcore_demand_data_rd,   // CounterEvent::OFFCORE_REQUESTS_DEMAND_DATA_RD
+        uint64_t offcore_demand_rfo,       // CounterEvent::OFFCORE_REQUESTS_DEMAND_RFO
+        size_t bytes_per_cacheline = 64
+    );
+
+    // Calculate AI from L3 miss data (fallback when IMC unavailable)
+    static DynamicAIResult analyze_from_l3_misses(
+        uint64_t total_flops,
+        uint64_t l3_read_misses,
+        uint64_t l3_write_misses,
+        size_t bytes_per_cacheline = 64
+    );
+
+    // Calculate AI from IMC CAS counts (most accurate)
+    static DynamicAIResult analyze_from_imc(
+        uint64_t total_flops,
+        uint64_t imc_cas_reads,
+        uint64_t imc_cas_writes,
+        size_t bytes_per_transaction = 64   // DDR4: 64 bytes per CAS
+    );
+
+    // Compare measured vs theoretical AI
+    static void set_theoretical_ai(DynamicAIResult& result, double theoretical_ai);
+
+    // Generate insights about cache behavior
+    static std::vector<std::string> generate_insights(const DynamicAIResult& result);
+};
+
+// Enhanced roofline point with dynamic AI
+struct EnhancedRooflinePoint {
+    RooflinePoint base;
+    DynamicAIResult dynamic_ai;
+    double efficiency_with_measured_ai = 0.0;  // Using measured AI
+    double efficiency_with_theoretical_ai = 0.0; // Using theoretical AI
+    std::string cache_behavior;  // "efficient", "thrashing", "streaming"
+};
+
 // Roofline recommendation generator
 struct RooflineRecommendation {
     std::string category;     // "optimization", "bottleneck", "info"
@@ -108,6 +164,12 @@ struct RooflineRecommendation {
 
 std::vector<RooflineRecommendation> generate_recommendations(
     const RooflinePoint& point,
+    const RooflineModel& model
+);
+
+// Enhanced recommendations with dynamic AI insights
+std::vector<RooflineRecommendation> generate_enhanced_recommendations(
+    const EnhancedRooflinePoint& point,
     const RooflineModel& model
 );
 

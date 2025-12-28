@@ -51,16 +51,41 @@ if(SIMD_BENCH_ENABLE_LIKWID)
     endif()
 endif()
 
-# Find Highway (from parent project)
-set(HWY_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/../highway")
-set(HWY_LIBRARY_DIR "${CMAKE_SOURCE_DIR}/../build")
+# Find Highway - try system first, then FetchContent as fallback
+find_package(hwy QUIET)
+if(NOT hwy_FOUND)
+    # Try to find from parent project (for local development)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/../highway/hwy/highway.h")
+        message(STATUS "Using Highway from parent directory")
+        set(HWY_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/../highway")
+        set(HWY_LIBRARY_DIR "${CMAKE_SOURCE_DIR}/../build")
+        set(HWY_FOUND_LOCAL TRUE)
+    else()
+        # Fetch Highway from GitHub
+        message(STATUS "Highway not found - fetching from GitHub")
+        include(FetchContent)
+        FetchContent_Declare(
+            highway
+            GIT_REPOSITORY https://github.com/google/highway.git
+            GIT_TAG master
+            GIT_SHALLOW TRUE
+        )
+        set(HWY_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+        set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(HWY_ENABLE_CONTRIB OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(highway)
+        set(HWY_FETCHED TRUE)
+    endif()
+else()
+    message(STATUS "Found system Highway: ${hwy_DIR}")
+endif()
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
-include_directories(${HWY_INCLUDE_DIR})
-
-# Link directories
-link_directories(${HWY_LIBRARY_DIR})
+if(HWY_FOUND_LOCAL)
+    include_directories(${HWY_INCLUDE_DIR})
+    link_directories(${HWY_LIBRARY_DIR})
+endif()
 
 # nlohmann_json
 find_package(nlohmann_json 3.11 QUIET)
@@ -86,11 +111,27 @@ set(SIMD_BENCH_SOURCES
     src/runner.cc
     src/insights.cc
     src/metrics_analyzer.cc
+    # New feature modules
+    src/memory_traffic.cc
+    src/prefetch.cc
+    src/branch_analysis.cc
+    src/scaling.cc
+    src/register_pressure.cc
+    src/loop_tiling.cc
+    src/config.cc
+    src/regression.cc
+    src/autovec.cc
+    src/backend_registry.cc
 )
 
 add_library(simd_bench_core ${SIMD_BENCH_SOURCES})
 target_include_directories(simd_bench_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(simd_bench_core PUBLIC Threads::Threads)
+
+# Link dl library for dynamic loading (Linux)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(simd_bench_core PUBLIC dl)
+endif()
 
 # Link optional libraries
 if(PAPI_FOUND)
@@ -166,6 +207,9 @@ target_link_libraries(insights_demo simd_bench_core)
 
 add_executable(insights_validator examples/insights_validator.cc)
 target_link_libraries(insights_validator simd_bench_core)
+
+add_executable(insights_validation_loop examples/insights_validation_loop.cc)
+target_link_libraries(insights_validation_loop simd_bench_core)
 
 # Installation
 install(TARGETS simd_bench_core simd-bench

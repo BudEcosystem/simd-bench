@@ -104,9 +104,19 @@ static RAPLVendor detect_rapl_vendor() {
 struct RAPLMonitor::Impl {
     bool initialized = false;
     EnergySample start_sample;
+    EnergySample prev_sample;       // For tracking wraparounds
     std::chrono::steady_clock::time_point start_time;
+    std::chrono::steady_clock::time_point prev_time;
     bool running = false;
     RAPLVendor vendor = RAPLVendor::UNKNOWN;
+
+    // Wraparound tracking - handles multiple wraparounds for long benchmarks
+    uint64_t pkg_wraparound_count = 0;
+    uint64_t cores_wraparound_count = 0;
+    uint64_t dram_wraparound_count = 0;
+    double accumulated_pkg_energy = 0.0;
+    double accumulated_cores_energy = 0.0;
+    double accumulated_dram_energy = 0.0;
 
     // Intel RAPL paths
     std::string intel_package_path = "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj";
@@ -128,6 +138,17 @@ struct RAPLMonitor::Impl {
 
     double energy_unit = 1e-6;  // microjoules to joules
     double max_energy_uj = 0;
+    double max_energy_joules = 0;  // Precomputed for efficiency
+
+    // Helper to calculate energy delta with wraparound handling
+    double calculate_energy_delta(double current, double previous, double max_range) const {
+        double delta = current - previous;
+        if (delta < 0 && max_range > 0) {
+            // Wraparound detected
+            delta += max_range;
+        }
+        return delta;
+    }
 };
 
 RAPLMonitor::RAPLMonitor() : impl_(std::make_unique<Impl>()) {}
@@ -182,6 +203,7 @@ bool RAPLMonitor::initialize() {
     std::ifstream max_file(max_range_path);
     if (max_file.is_open()) {
         max_file >> impl_->max_energy_uj;
+        impl_->max_energy_joules = impl_->max_energy_uj * 1e-6;  // Precompute for efficiency
     }
 
     impl_->initialized = true;
@@ -223,8 +245,19 @@ EnergySample RAPLMonitor::sample() {
 
 bool RAPLMonitor::start() {
     impl_->start_sample = sample();
+    impl_->prev_sample = impl_->start_sample;
     impl_->start_time = std::chrono::steady_clock::now();
+    impl_->prev_time = impl_->start_time;
     impl_->running = true;
+
+    // Reset wraparound tracking
+    impl_->pkg_wraparound_count = 0;
+    impl_->cores_wraparound_count = 0;
+    impl_->dram_wraparound_count = 0;
+    impl_->accumulated_pkg_energy = 0.0;
+    impl_->accumulated_cores_energy = 0.0;
+    impl_->accumulated_dram_energy = 0.0;
+
     return true;
 }
 
@@ -240,22 +273,41 @@ EnergyMetrics RAPLMonitor::get_metrics() {
     auto end_time = std::chrono::steady_clock::now();
 
     double elapsed = std::chrono::duration<double>(end_time - impl_->start_time).count();
+    double max_energy = impl_->max_energy_joules;
 
-    // Handle wraparound
-    double pkg_energy = end_sample.package_joules - impl_->start_sample.package_joules;
-    if (pkg_energy < 0 && impl_->max_energy_uj > 0) {
-        pkg_energy += impl_->max_energy_uj * 1e-6;
-    }
+    // Handle multiple wraparounds for long-running benchmarks
+    // The RAPL counter typically wraps around every ~60 seconds at 250W
+    // (max_energy_uj is typically around 16M uJ = 16J for 32-bit counter)
 
-    double cores_energy = end_sample.cores_joules - impl_->start_sample.cores_joules;
-    if (cores_energy < 0 && impl_->max_energy_uj > 0) {
-        cores_energy += impl_->max_energy_uj * 1e-6;
-    }
+    // Calculate delta from previous sample to detect wraparounds incrementally
+    double pkg_delta = impl_->calculate_energy_delta(
+        end_sample.package_joules,
+        impl_->prev_sample.package_joules,
+        max_energy);
 
-    double dram_energy = end_sample.dram_joules - impl_->start_sample.dram_joules;
-    if (dram_energy < 0 && impl_->max_energy_uj > 0) {
-        dram_energy += impl_->max_energy_uj * 1e-6;
-    }
+    double cores_delta = impl_->calculate_energy_delta(
+        end_sample.cores_joules,
+        impl_->prev_sample.cores_joules,
+        max_energy);
+
+    double dram_delta = impl_->calculate_energy_delta(
+        end_sample.dram_joules,
+        impl_->prev_sample.dram_joules,
+        max_energy);
+
+    // Accumulate energy
+    impl_->accumulated_pkg_energy += pkg_delta;
+    impl_->accumulated_cores_energy += cores_delta;
+    impl_->accumulated_dram_energy += dram_delta;
+
+    // Update previous sample
+    impl_->prev_sample = end_sample;
+    impl_->prev_time = end_time;
+
+    // Calculate total energy from accumulation
+    double pkg_energy = impl_->accumulated_pkg_energy;
+    double cores_energy = impl_->accumulated_cores_energy;
+    double dram_energy = impl_->accumulated_dram_energy;
 
     metrics.energy_joules = pkg_energy;
 

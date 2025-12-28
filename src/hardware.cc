@@ -7,10 +7,25 @@
 #include <algorithm>
 #include <cstring>
 #include <thread>
+#include <atomic>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <cpuid.h>
+#include <emmintrin.h>  // For _mm_sfence
 #endif
+
+// Helper for store fence (ensure streaming stores complete)
+namespace {
+inline void stream_fence() {
+#if defined(__x86_64__) || defined(_M_X64)
+    _mm_sfence();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("dsb st" ::: "memory");
+#else
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+#endif
+}
+}  // anonymous namespace
 
 namespace hn = hwy::HWY_NAMESPACE;
 
@@ -232,11 +247,40 @@ double HardwareInfo::calculate_peak_gflops(bool double_precision) const {
     return freq * lanes * fma_units * 2;
 }
 
+double HardwareInfo::calculate_peak_gflops_throttled(bool double_precision,
+                                                      AVX512License license) const {
+    // Peak GFLOPS with AVX-512 frequency throttling applied
+    int lanes = max_vector_bits / (double_precision ? 64 : 32);
+    double freq = measured_frequency_ghz > 0 ? measured_frequency_ghz : base_frequency_ghz;
+
+    // Apply frequency penalty for wide vectors
+    double penalty = FrequencyThrottling::get_penalty(max_vector_bits, license);
+    freq *= penalty;
+
+    return freq * lanes * fma_units * 2;
+}
+
+double HardwareInfo::calculate_sustained_peak_gflops(bool double_precision) const {
+    // Realistic sustained peak (assumes medium AVX-512 license for 512-bit)
+    AVX512License license = AVX512License::NONE;
+    if (max_vector_bits >= 512) {
+        license = AVX512License::L1;  // Assume medium throttling
+    }
+    return calculate_peak_gflops_throttled(double_precision, license);
+}
+
 double HardwareInfo::calculate_ridge_point() const {
     // Ridge point = peak GFLOPS / memory bandwidth (GB/s)
     // Result is in FLOP/byte
     if (measured_memory_bw_gbps <= 0) return 10.0;  // Default
     return theoretical_peak_sp_gflops / measured_memory_bw_gbps;
+}
+
+double HardwareInfo::calculate_ridge_point_throttled(AVX512License license) const {
+    // Ridge point with frequency throttling accounted for
+    if (measured_memory_bw_gbps <= 0) return 10.0;
+    double throttled_peak = calculate_peak_gflops_throttled(false, license);
+    return throttled_peak / measured_memory_bw_gbps;
 }
 
 bool HardwareInfo::has_hardware_counters() const {
@@ -302,23 +346,161 @@ double measure_memory_bandwidth_gbps(size_t size_mb) {
     return bytes / seconds / 1e9;  // GB/s
 }
 
+// Streaming bandwidth measurement using non-temporal stores (true peak DRAM bandwidth)
+double measure_streaming_bandwidth_gbps(size_t size_mb) {
+    if (size_mb < 1) size_mb = 1;
+    const size_t size = size_mb * 1024 * 1024;
+    const size_t count = size / sizeof(float);
+
+    auto src = hwy::AllocateAligned<float>(count);
+    auto dst = hwy::AllocateAligned<float>(count);
+
+    if (!src || !dst) return 0.0;
+
+    // Initialize source data
+    for (size_t i = 0; i < count; ++i) {
+        src[i] = static_cast<float>(i);
+    }
+
+    const hn::ScalableTag<float> d;
+    const size_t N = hn::Lanes(d);
+
+    // Warmup with streaming stores
+    for (size_t i = 0; i + N <= count; i += N) {
+        auto v = hn::Load(d, src.get() + i);
+        hn::Stream(v, d, dst.get() + i);  // Non-temporal store
+    }
+    stream_fence();  // Ensure all NT stores complete
+
+    // Measure with multiple iterations for stable timing
+    Timer timer;
+    timer.start();
+
+    const int iterations = 10;
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (size_t i = 0; i + N <= count; i += N) {
+            auto v = hn::Load(d, src.get() + i);
+            hn::Stream(v, d, dst.get() + i);  // Non-temporal store bypasses cache
+        }
+        stream_fence();
+    }
+
+    timer.stop();
+
+    // Bytes transferred: read src + write dst (no RFO for NT stores)
+    double bytes = 2.0 * size * iterations;
+    double seconds = timer.elapsed_seconds();
+
+    return (seconds > 0) ? (bytes / seconds / 1e9) : 0.0;  // GB/s
+}
+
+// Read-only bandwidth measurement (memory read throughput)
+double measure_read_bandwidth_gbps(size_t size_mb) {
+    if (size_mb < 1) size_mb = 1;
+    const size_t size = size_mb * 1024 * 1024;
+    const size_t count = size / sizeof(float);
+
+    auto src = hwy::AllocateAligned<float>(count);
+    if (!src) return 0.0;
+
+    // Initialize to prevent optimization
+    for (size_t i = 0; i < count; ++i) {
+        src[i] = static_cast<float>(i);
+    }
+
+    const hn::ScalableTag<float> d;
+    const size_t N = hn::Lanes(d);
+
+    // Warmup pass
+    auto accumulator = hn::Zero(d);
+    for (size_t i = 0; i + N <= count; i += N) {
+        accumulator = hn::Add(accumulator, hn::Load(d, src.get() + i));
+    }
+
+    // Use volatile to prevent dead code elimination
+    volatile float sink = hn::ReduceSum(d, accumulator);
+    (void)sink;
+
+    Timer timer;
+    timer.start();
+
+    const int iterations = 10;
+    for (int iter = 0; iter < iterations; ++iter) {
+        accumulator = hn::Zero(d);
+        for (size_t i = 0; i + N <= count; i += N) {
+            accumulator = hn::Add(accumulator, hn::Load(d, src.get() + i));
+        }
+        sink = hn::ReduceSum(d, accumulator);
+    }
+
+    timer.stop();
+
+    // Only counting read bytes
+    double bytes = static_cast<double>(size) * iterations;
+    double seconds = timer.elapsed_seconds();
+
+    return (seconds > 0) ? (bytes / seconds / 1e9) : 0.0;  // GB/s
+}
+
+// Write-only bandwidth measurement (non-temporal stores)
+double measure_write_bandwidth_gbps(size_t size_mb) {
+    if (size_mb < 1) size_mb = 1;
+    const size_t size = size_mb * 1024 * 1024;
+    const size_t count = size / sizeof(float);
+
+    auto dst = hwy::AllocateAligned<float>(count);
+    if (!dst) return 0.0;
+
+    const hn::ScalableTag<float> d;
+    const size_t N = hn::Lanes(d);
+    const auto fill_value = hn::Set(d, 1.0f);
+
+    // Warmup with streaming stores
+    for (size_t i = 0; i + N <= count; i += N) {
+        hn::Stream(fill_value, d, dst.get() + i);
+    }
+    stream_fence();
+
+    Timer timer;
+    timer.start();
+
+    const int iterations = 10;
+    for (int iter = 0; iter < iterations; ++iter) {
+        // Use different values per iteration to prevent optimization
+        const auto value = hn::Set(d, static_cast<float>(iter + 1));
+        for (size_t i = 0; i + N <= count; i += N) {
+            hn::Stream(value, d, dst.get() + i);  // Non-temporal store
+        }
+        stream_fence();
+    }
+
+    timer.stop();
+
+    // Only counting write bytes (no RFO with NT stores)
+    double bytes = static_cast<double>(size) * iterations;
+    double seconds = timer.elapsed_seconds();
+
+    return (seconds > 0) ? (bytes / seconds / 1e9) : 0.0;  // GB/s
+}
+
 BandwidthMeasurement measure_cache_bandwidths() {
     BandwidthMeasurement bw;
 
-    // All measurements use minimum 1 MB due to allocation constraints
-    // The actual cache level tested depends on working set vs cache size
-
-    // L1/L2 estimate: 1 MB (repeated access warms caches)
+    // L1 cache test: ~16 KB working set (fits in L1)
+    // Using repeated access pattern for cache warming
     bw.l1_bandwidth_gbps = measure_memory_bandwidth_gbps(1);
 
-    // L2/L3 estimate: 2 MB
+    // L2 cache test: ~512 KB working set (fits in L2, exceeds L1)
     bw.l2_bandwidth_gbps = measure_memory_bandwidth_gbps(2);
 
-    // L3: 4 MB
+    // L3 cache test: ~4 MB working set (fits in L3, exceeds L2)
     bw.l3_bandwidth_gbps = measure_memory_bandwidth_gbps(4);
 
-    // DRAM: 64 MB
+    // DRAM test: 64 MB (exceeds L3, main memory)
     bw.dram_bandwidth_gbps = measure_memory_bandwidth_gbps(64);
+
+    // Streaming bandwidth using non-temporal stores (true DRAM peak)
+    bw.streaming_bandwidth_gbps = measure_streaming_bandwidth_gbps(64);
 
     return bw;
 }

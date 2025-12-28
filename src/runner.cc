@@ -136,11 +136,13 @@ BenchmarkResult BenchmarkRunner::run(const KernelConfig& kernel) {
     result.speedup_vs_scalar = calculate_speedup(result.results);
 
     // Calculate average vectorization ratio
-    double sum_vec = 0;
-    for (const auto& vr : result.results) {
-        sum_vec += vr.metrics.simd.vectorization_ratio;
+    if (!result.results.empty()) {
+        double sum_vec = 0;
+        for (const auto& vr : result.results) {
+            sum_vec += vr.metrics.simd.vectorization_ratio;
+        }
+        result.avg_vectorization_ratio = sum_vec / result.results.size();
     }
-    result.avg_vectorization_ratio = sum_vec / result.results.size();
 
     return result;
 }
@@ -384,6 +386,10 @@ std::string BenchmarkRunner::find_best_variant(const std::vector<VariantResult>&
 }
 
 double BenchmarkRunner::calculate_speedup(const std::vector<VariantResult>& results) {
+    if (results.empty()) {
+        return 1.0;  // No speedup if no results
+    }
+
     double scalar_gflops = 0;
     double best_gflops = 0;
 
@@ -394,8 +400,14 @@ double BenchmarkRunner::calculate_speedup(const std::vector<VariantResult>& resu
         best_gflops = std::max(best_gflops, vr.metrics.performance.gflops);
     }
 
+    // If no scalar variant found, use first result as baseline
     if (scalar_gflops <= 0) {
         scalar_gflops = results[0].metrics.performance.gflops;
+    }
+
+    // Avoid division by zero
+    if (scalar_gflops <= 0) {
+        return 1.0;
     }
 
     return best_gflops / scalar_gflops;

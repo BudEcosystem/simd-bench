@@ -479,4 +479,159 @@ enum class ReportFormat {
     CSV
 };
 
+// ============================================================================
+// Safe FLOPS Calculation Utilities (Overflow-safe)
+// ============================================================================
+
+// AVX-512 License Levels (for frequency throttling estimation)
+enum class AVX512License {
+    NONE,   // No AVX-512 usage
+    L0,     // Light AVX-512 (minimal downclocking, ~5%)
+    L1,     // Medium AVX-512 (~15% downclocking)
+    L2      // Heavy AVX-512 (~25% downclocking)
+};
+
+// Frequency throttling factors for different SIMD widths
+struct FrequencyThrottling {
+    static constexpr double AVX512_L0_PENALTY = 0.95;   // L0: 5% slowdown
+    static constexpr double AVX512_L1_PENALTY = 0.85;   // L1: 15% slowdown
+    static constexpr double AVX512_L2_PENALTY = 0.75;   // L2: 25% slowdown
+    static constexpr double AVX2_PENALTY = 0.97;        // AVX2: ~3% on some CPUs
+    static constexpr double NO_PENALTY = 1.0;
+
+    static double get_penalty(int vector_bits, AVX512License license = AVX512License::NONE) {
+        if (vector_bits >= 512) {
+            switch (license) {
+                case AVX512License::L0: return AVX512_L0_PENALTY;
+                case AVX512License::L1: return AVX512_L1_PENALTY;
+                case AVX512License::L2: return AVX512_L2_PENALTY;
+                default: return AVX512_L1_PENALTY;  // Default to medium
+            }
+        } else if (vector_bits >= 256) {
+            return AVX2_PENALTY;
+        }
+        return NO_PENALTY;
+    }
+};
+
+// Safe FLOPS calculation utilities (handles overflow for large matrices)
+class FlopsCalculator {
+public:
+    // Matrix multiply: 2*M*N*K FLOPS
+    static uint64_t matmul_flops(size_t M, size_t N, size_t K) noexcept {
+        // Use 128-bit arithmetic mentally: cast to uint64_t early
+        // Check for overflow before calculation
+        if (would_overflow_matmul(M, N, K)) {
+            return UINT64_MAX;  // Saturate on overflow
+        }
+        return static_cast<uint64_t>(2) * static_cast<uint64_t>(M) *
+               static_cast<uint64_t>(N) * static_cast<uint64_t>(K);
+    }
+
+    // Check if matmul FLOPS would overflow uint64_t
+    static bool would_overflow_matmul(size_t M, size_t N, size_t K) noexcept {
+        // 2*M*N*K must fit in uint64_t
+        // UINT64_MAX = 18446744073709551615
+        // Max safe: M*N*K <= UINT64_MAX/2
+        constexpr uint64_t MAX_SAFE = UINT64_MAX / 2;
+
+        if (M == 0 || N == 0 || K == 0) return false;
+
+        // Check M*N first
+        if (M > MAX_SAFE / N) return true;
+        uint64_t mn = static_cast<uint64_t>(M) * N;
+
+        // Check (M*N)*K
+        if (mn > MAX_SAFE / K) return true;
+
+        return false;
+    }
+
+    // Dot product: 2*N FLOPS (N muls + N-1 adds, approx 2N)
+    static uint64_t dot_product_flops(size_t N) noexcept {
+        if (N > UINT64_MAX / 2) return UINT64_MAX;
+        return static_cast<uint64_t>(2) * N;
+    }
+
+    // Element-wise operations: N FLOPS per operation
+    static uint64_t elementwise_flops(size_t N, size_t ops_per_element = 1) noexcept {
+        if (ops_per_element == 0) return 0;
+        if (N > UINT64_MAX / ops_per_element) return UINT64_MAX;
+        return static_cast<uint64_t>(N) * ops_per_element;
+    }
+
+    // Reduction operations: N FLOPS
+    static uint64_t reduction_flops(size_t N) noexcept {
+        return static_cast<uint64_t>(N);
+    }
+
+    // Convolution: output_size * kernel_size * 2 FLOPS (multiply-accumulate)
+    static uint64_t convolution_flops(size_t output_size, size_t kernel_size) noexcept {
+        if (would_overflow_matmul(output_size, kernel_size, 2)) return UINT64_MAX;
+        return static_cast<uint64_t>(2) * output_size * kernel_size;
+    }
+
+    // GEMM with batching: batch * 2*M*N*K FLOPS
+    static uint64_t batched_matmul_flops(size_t batch, size_t M, size_t N, size_t K) noexcept {
+        uint64_t single = matmul_flops(M, N, K);
+        if (single == UINT64_MAX) return UINT64_MAX;
+        if (batch > UINT64_MAX / single) return UINT64_MAX;
+        return batch * single;
+    }
+
+    // Calculate GFLOPS from FLOPS and time
+    static double to_gflops(uint64_t flops, double seconds) noexcept {
+        if (seconds <= 0.0 || flops == 0) return 0.0;
+        return static_cast<double>(flops) / (seconds * 1e9);
+    }
+
+    // Calculate TFLOPS from FLOPS and time
+    static double to_tflops(uint64_t flops, double seconds) noexcept {
+        if (seconds <= 0.0 || flops == 0) return 0.0;
+        return static_cast<double>(flops) / (seconds * 1e12);
+    }
+};
+
+// ============================================================================
+// Dynamic Arithmetic Intensity Calculator
+// ============================================================================
+
+class ArithmeticIntensityCalculator {
+public:
+    // Calculate measured AI from actual memory traffic
+    static double calculate_measured(uint64_t total_flops,
+                                      uint64_t bytes_read,
+                                      uint64_t bytes_written) noexcept {
+        uint64_t total_bytes = bytes_read + bytes_written;
+        if (total_bytes == 0) return 0.0;
+        return static_cast<double>(total_flops) / static_cast<double>(total_bytes);
+    }
+
+    // Calculate theoretical AI (assuming perfect cache)
+    static double calculate_theoretical(uint64_t total_flops,
+                                         size_t input_bytes,
+                                         size_t output_bytes) noexcept {
+        size_t total_bytes = input_bytes + output_bytes;
+        if (total_bytes == 0) return 0.0;
+        return static_cast<double>(total_flops) / static_cast<double>(total_bytes);
+    }
+
+    // Calculate cache amplification factor
+    // > 1.0 means more memory traffic than theoretical (cache thrashing)
+    // < 1.0 means less traffic (good cache reuse)
+    static double cache_amplification(double theoretical_ai, double measured_ai) noexcept {
+        if (measured_ai <= 0.0) return 1.0;
+        return theoretical_ai / measured_ai;
+    }
+
+    // Classify AI level
+    static std::string classify(double ai) {
+        if (ai < 0.25) return "Very Low (streaming)";
+        if (ai < 1.0) return "Low (memory-bound)";
+        if (ai < 4.0) return "Medium (transitional)";
+        if (ai < 16.0) return "High (compute-bound)";
+        return "Very High (compute-intensive)";
+    }
+};
+
 }  // namespace simd_bench

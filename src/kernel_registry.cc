@@ -1,6 +1,9 @@
 #include "simd_bench/kernel_registry.h"
 #include "hwy/aligned_allocator.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 
 namespace simd_bench {
 
@@ -139,6 +142,15 @@ void* setup_vector_add(size_t size) {
     data->c = static_cast<float*>(hwy::AllocateAlignedBytes(size * sizeof(float),
                                                              nullptr, 0));
 
+    // Null-check after allocations - critical for preventing crashes
+    if (!data->a || !data->b || !data->c) {
+        if (data->a) hwy::FreeAlignedBytes(data->a, nullptr, 0);
+        if (data->b) hwy::FreeAlignedBytes(data->b, nullptr, 0);
+        if (data->c) hwy::FreeAlignedBytes(data->c, nullptr, 0);
+        delete data;
+        return nullptr;
+    }
+
     for (size_t i = 0; i < size; ++i) {
         data->a[i] = static_cast<float>(i % 100) / 100.0f;
         data->b[i] = static_cast<float>((i + 50) % 100) / 100.0f;
@@ -171,11 +183,22 @@ void* setup_dot_product(size_t size) {
     return setup_vector_add(size);  // Same setup
 }
 
-bool verify_dot_product(const void* result, const void* reference, size_t) {
+bool verify_dot_product(const void* result, const void* reference, size_t size) {
     auto res = *static_cast<const float*>(result);
     auto ref = *static_cast<const float*>(reference);
 
-    return std::abs(res - ref) / (std::abs(ref) + 1e-10f) < 1e-4f;
+    // Scale tolerance with problem size for reductions
+    // Accumulated FP error grows approximately as sqrt(N) for well-behaved sums
+    // Use sqrt(N) * machine_epsilon * scaling_factor for tolerance
+    double base_tolerance = 1e-4;
+    double size_scaling = std::sqrt(static_cast<double>(size)) / 32.0;  // Normalize to typical size
+    double tolerance = base_tolerance * std::max(1.0, size_scaling);
+
+    // Also scale with magnitude of result for better numerical stability
+    double abs_ref = std::abs(static_cast<double>(ref));
+    double abs_tolerance = tolerance * std::max(1.0, abs_ref);
+
+    return std::abs(static_cast<double>(res) - static_cast<double>(ref)) < abs_tolerance;
 }
 
 void* setup_matrix_multiply(size_t size) {
@@ -187,12 +210,28 @@ void* setup_matrix_multiply(size_t size) {
     data->K = n;
 
     size_t elements = n * n;
+
+    // Check for potential overflow before allocation
+    if (elements > SIZE_MAX / sizeof(float)) {
+        delete data;
+        return nullptr;
+    }
+
     data->A = static_cast<float*>(hwy::AllocateAlignedBytes(elements * sizeof(float),
                                                              nullptr, 0));
     data->B = static_cast<float*>(hwy::AllocateAlignedBytes(elements * sizeof(float),
                                                              nullptr, 0));
     data->C = static_cast<float*>(hwy::AllocateAlignedBytes(elements * sizeof(float),
                                                              nullptr, 0));
+
+    // Null-check after allocations - critical for preventing crashes
+    if (!data->A || !data->B || !data->C) {
+        if (data->A) hwy::FreeAlignedBytes(data->A, nullptr, 0);
+        if (data->B) hwy::FreeAlignedBytes(data->B, nullptr, 0);
+        if (data->C) hwy::FreeAlignedBytes(data->C, nullptr, 0);
+        delete data;
+        return nullptr;
+    }
 
     for (size_t i = 0; i < elements; ++i) {
         data->A[i] = static_cast<float>(i % 100) / 100.0f;

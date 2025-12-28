@@ -131,6 +131,21 @@ private:
     double& result_;
 };
 
+// Timer resolution info
+struct TimerResolution {
+    double resolution_ns = 0.0;           // Timer resolution in nanoseconds
+    bool is_high_resolution = false;      // True if resolution < 100ns
+    bool is_suitable_for_microbench = false;  // True if resolution < 1us
+    std::string description;
+};
+
+// Validate timer resolution at startup
+// Returns timer resolution info and warns if resolution is too coarse
+TimerResolution validate_timer_resolution();
+
+// Get minimum measurable duration (based on timer resolution)
+double get_minimum_measurable_duration_ns();
+
 // Statistical timing with multiple runs
 struct TimingStats {
     double min_seconds = 0.0;

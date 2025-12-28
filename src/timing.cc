@@ -3,8 +3,73 @@
 #include <numeric>
 #include <cmath>
 #include <vector>
+#include <sstream>
+#include <ratio>
 
 namespace simd_bench {
+
+// Timer resolution validation implementation
+TimerResolution validate_timer_resolution() {
+    TimerResolution result;
+
+    // Check the clock's compile-time period
+    using Period = Clock::period;
+    double theoretical_resolution_ns = 1e9 * static_cast<double>(Period::num) / Period::den;
+
+    // Empirically measure actual resolution by finding minimum observable time difference
+    std::vector<double> deltas;
+    deltas.reserve(1000);
+
+    for (int i = 0; i < 1000; ++i) {
+        auto t1 = Clock::now();
+        auto t2 = Clock::now();
+
+        // Keep sampling until we get a non-zero delta
+        while (t2 == t1) {
+            t2 = Clock::now();
+        }
+
+        double delta = std::chrono::duration<double, std::nano>(t2 - t1).count();
+        deltas.push_back(delta);
+    }
+
+    // Use median as the measured resolution (robust to outliers)
+    std::sort(deltas.begin(), deltas.end());
+    double measured_resolution_ns = deltas[deltas.size() / 2];
+
+    // Use the larger of theoretical and measured resolution
+    result.resolution_ns = std::max(theoretical_resolution_ns, measured_resolution_ns);
+
+    // Categorize resolution quality
+    result.is_high_resolution = (result.resolution_ns < 100.0);       // < 100ns
+    result.is_suitable_for_microbench = (result.resolution_ns < 1000.0);  // < 1us
+
+    // Generate description
+    std::ostringstream oss;
+    oss << "Timer resolution: " << result.resolution_ns << " ns";
+    if (result.is_high_resolution) {
+        oss << " (high-resolution, suitable for nanosecond-level timing)";
+    } else if (result.is_suitable_for_microbench) {
+        oss << " (suitable for microsecond-level timing)";
+    } else {
+        oss << " (WARNING: resolution too coarse for accurate microbenchmarks)";
+    }
+    result.description = oss.str();
+
+    return result;
+}
+
+double get_minimum_measurable_duration_ns() {
+    static double min_duration = -1.0;
+
+    if (min_duration < 0) {
+        auto resolution = validate_timer_resolution();
+        // Recommend at least 10x the resolution for reliable measurements
+        min_duration = resolution.resolution_ns * 10.0;
+    }
+
+    return min_duration;
+}
 
 double Timer::measure_frequency_ghz() {
     // Run a calibration loop and measure cycles vs time
