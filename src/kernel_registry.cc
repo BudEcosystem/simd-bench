@@ -13,10 +13,12 @@ KernelRegistry& KernelRegistry::instance() {
 }
 
 void KernelRegistry::register_kernel(const KernelConfig& config) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     kernels_[config.name] = config;
 }
 
 const KernelConfig* KernelRegistry::get_kernel(const std::string& name) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = kernels_.find(name);
     if (it != kernels_.end()) {
         return &it->second;
@@ -25,6 +27,7 @@ const KernelConfig* KernelRegistry::get_kernel(const std::string& name) const {
 }
 
 std::vector<std::string> KernelRegistry::get_kernel_names() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<std::string> names;
     names.reserve(kernels_.size());
     for (const auto& [name, _] : kernels_) {
@@ -36,6 +39,7 @@ std::vector<std::string> KernelRegistry::get_kernel_names() const {
 std::vector<const KernelConfig*> KernelRegistry::get_kernels_by_category(
     const std::string& category
 ) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<const KernelConfig*> result;
     for (const auto& [_, config] : kernels_) {
         if (config.category == category) {
@@ -46,10 +50,12 @@ std::vector<const KernelConfig*> KernelRegistry::get_kernels_by_category(
 }
 
 bool KernelRegistry::has_kernel(const std::string& name) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return kernels_.find(name) != kernels_.end();
 }
 
 void KernelRegistry::clear() {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     kernels_.clear();
 }
 

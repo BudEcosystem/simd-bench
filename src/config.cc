@@ -549,6 +549,75 @@ std::vector<std::string> ConfigManager::custom_keys() const {
     return keys;
 }
 
+// Template specializations for ConfigManager::get
+template<>
+bool ConfigManager::get<bool>(const std::string& key, const bool& default_value) const {
+    auto it = config_.custom.find(key);
+    if (it == config_.custom.end()) return default_value;
+    if (auto* val = std::get_if<bool>(&it->second)) return *val;
+    // Try string conversion
+    if (auto* str = std::get_if<std::string>(&it->second)) {
+        return (*str == "true" || *str == "1" || *str == "yes");
+    }
+    return default_value;
+}
+
+template<>
+int64_t ConfigManager::get<int64_t>(const std::string& key, const int64_t& default_value) const {
+    auto it = config_.custom.find(key);
+    if (it == config_.custom.end()) return default_value;
+    if (auto* val = std::get_if<int64_t>(&it->second)) return *val;
+    if (auto* str = std::get_if<std::string>(&it->second)) {
+        try { return std::stoll(*str); } catch (...) { return default_value; }
+    }
+    return default_value;
+}
+
+template<>
+double ConfigManager::get<double>(const std::string& key, const double& default_value) const {
+    auto it = config_.custom.find(key);
+    if (it == config_.custom.end()) return default_value;
+    if (auto* val = std::get_if<double>(&it->second)) return *val;
+    if (auto* i = std::get_if<int64_t>(&it->second)) return static_cast<double>(*i);
+    if (auto* str = std::get_if<std::string>(&it->second)) {
+        try { return std::stod(*str); } catch (...) { return default_value; }
+    }
+    return default_value;
+}
+
+template<>
+std::string ConfigManager::get<std::string>(const std::string& key, const std::string& default_value) const {
+    auto it = config_.custom.find(key);
+    if (it == config_.custom.end()) return default_value;
+    if (auto* val = std::get_if<std::string>(&it->second)) return *val;
+    // Convert other types to string
+    if (auto* b = std::get_if<bool>(&it->second)) return *b ? "true" : "false";
+    if (auto* i = std::get_if<int64_t>(&it->second)) return std::to_string(*i);
+    if (auto* d = std::get_if<double>(&it->second)) return std::to_string(*d);
+    return default_value;
+}
+
+// Template specializations for ConfigManager::set
+template<>
+void ConfigManager::set<bool>(const std::string& key, const bool& value) {
+    config_.custom[key] = value;
+}
+
+template<>
+void ConfigManager::set<int64_t>(const std::string& key, const int64_t& value) {
+    config_.custom[key] = value;
+}
+
+template<>
+void ConfigManager::set<double>(const std::string& key, const double& value) {
+    config_.custom[key] = value;
+}
+
+template<>
+void ConfigManager::set<std::string>(const std::string& key, const std::string& value) {
+    config_.custom[key] = value;
+}
+
 // ============================================================================
 // Command-line parsing
 // ============================================================================

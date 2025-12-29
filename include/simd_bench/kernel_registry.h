@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <memory>
 #include <functional>
+#include <mutex>
+#include <shared_mutex>
 
 namespace simd_bench {
 
@@ -13,32 +15,36 @@ namespace simd_bench {
 
 class KernelRegistry {
 public:
-    // Singleton access
+    // Singleton access (thread-safe via C++11 static initialization)
     static KernelRegistry& instance();
 
-    // Register a kernel
+    // Register a kernel (thread-safe)
     void register_kernel(const KernelConfig& config);
 
-    // Get a kernel by name
+    // Get a kernel by name (thread-safe)
     const KernelConfig* get_kernel(const std::string& name) const;
 
-    // Get all registered kernels
+    // Get all registered kernels (thread-safe)
     std::vector<std::string> get_kernel_names() const;
 
-    // Get kernels by category
+    // Get kernels by category (thread-safe)
     std::vector<const KernelConfig*> get_kernels_by_category(const std::string& category) const;
 
-    // Check if kernel exists
+    // Check if kernel exists (thread-safe)
     bool has_kernel(const std::string& name) const;
 
-    // Get number of registered kernels
-    size_t size() const { return kernels_.size(); }
+    // Get number of registered kernels (thread-safe)
+    size_t size() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        return kernels_.size();
+    }
 
-    // Clear all registered kernels (for testing)
+    // Clear all registered kernels (for testing, thread-safe)
     void clear();
 
 private:
     KernelRegistry() = default;
+    mutable std::shared_mutex mutex_;  // Reader-writer lock for thread safety
     std::unordered_map<std::string, KernelConfig> kernels_;
 };
 
