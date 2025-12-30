@@ -81,7 +81,7 @@ else()
 endif()
 
 # Include directories
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(HWY_FOUND_LOCAL)
     include_directories(${HWY_INCLUDE_DIR})
     link_directories(${HWY_LIBRARY_DIR})
@@ -125,7 +125,7 @@ set(SIMD_BENCH_SOURCES
 )
 
 add_library(simd_bench_core ${SIMD_BENCH_SOURCES})
-target_include_directories(simd_bench_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(simd_bench_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(simd_bench_core PUBLIC Threads::Threads)
 
 # Link dl library for dynamic loading (Linux)
